@@ -1,0 +1,13 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+
+/.quarto/
+**/*.quarto_ipynb
+
+.Rproj.user/
+.quarto/
+.RData
+.Rhistory
+*.zip

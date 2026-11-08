@@ -1,0 +1,363 @@
+---
+title: "Laboratorio 2A: Calidad de datos con un dataset real"
+subtitle: "Ciencia de Datos e IA Aplicada — Sesión 2"
+author: "Edgar Grimaldo Matto Pablo"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    code-fold: false
+    df-print: paged
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+# Propósito y pregunta de investigación
+
+**Pregunta:** ¿Qué características de una producción (año, formato y género) se asocian con su calificación?
+
+**Objetivo del laboratorio:** diagnosticar y preparar la base de películas y series, evaluar valores faltantes, transformar campos, auditar duplicados, examinar plausibilidad y validar reglas de calidad. Los datos crudos se preservan; las decisiones de limpieza se documentan. La asociación observada es descriptiva y no causal.
+
+# Preparación e importación reproducible
+
+El archivo CSV original debe estar en `data/raw/movies.csv`, dentro de la carpeta del proyecto de RStudio. No se usa `file.choose()` en este documento porque **Render** requiere una ruta reproducible.
+
+```{r}
+#| label: setup
+paquetes <- c("dplyr", "tidyr", "readr", "stringr", "ggplot2", "knitr")
+no_instalados <- setdiff(paquetes, rownames(installed.packages()))
+if (length(no_instalados)) stop("Instala primero los paquetes: ", paste(no_instalados, collapse=", "))
+library(dplyr)
+library(tidyr)
+library(readr)
+library(stringr)
+library(ggplot2)
+library(knitr)
+ruta_csv <- "data/raw/movies.csv"
+if (!file.exists(ruta_csv)) stop("No se encontró data/raw/movies.csv. Copia el CSV a esa carpeta del proyecto antes de usar Render.")
+# read.csv permite mantener el comportamiento ya usado en la consola del estudiante.
+movies_raw <- read.csv(ruta_csv, stringsAsFactors = FALSE, check.names = TRUE)
+stopifnot(all(c("MOVIES", "YEAR", "GENRE", "RATING", "ONE.LINE", "STARS", "VOTES", "RunTime", "Gross") %in% names(movies_raw)))
+cat("Dimensiones del archivo original:", nrow(movies_raw), "filas x", ncol(movies_raw), "columnas\n")
+```
+
+# Pasos 1 y 2. Diagnóstico inicial de calidad
+
+```{r}
+#| label: diagnostico
+str(movies_raw)
+knitr::kable(head(movies_raw, 6), caption = "Muestra de registros crudos")
+faltantes_iniciales <- data.frame(
+  variable = names(movies_raw),
+  n_na = as.integer(colSums(is.na(movies_raw))),
+  porcentaje_na = round(100 * colMeans(is.na(movies_raw)), 2)
+)
+knitr::kable(faltantes_iniciales, caption = "Valores NA en el dataset original")
+cat("Copias exactas de filas:", sum(duplicated(movies_raw)), "\n")
+```
+
+```{r}
+#| label: grafico-faltantes
+faltantes_iniciales %>%
+  ggplot(aes(x = reorder(variable, n_na), y = n_na)) +
+  geom_col(fill = "steelblue") + coord_flip() +
+  labs(title = "Valores NA por variable", x = "Variable", y = "Número de NA") +
+  theme_minimal()
+```
+
+**Interpretación:** el número de `NA` representa únicamente los faltantes explícitos. Los textos vacíos y los valores centinela se revisan por separado.
+
+# Paso 3. Tipos de datos, expresiones regulares y valores centinela
+
+```{r}
+#| label: transformacion
+movies_clean <- movies_raw %>%
+  mutate(
+    anio_inicio = suppressWarnings(as.integer(str_extract(as.character(YEAR), "\\d{4}"))),
+    anio_fin = suppressWarnings(as.integer(str_match(as.character(YEAR), "\\d{4}\\s*[-–]\\s*(\\d{4})")[, 2])),
+    es_serie = str_detect(as.character(YEAR), "\\d{4}\\s*[-–]"),
+    rating = suppressWarnings(parse_number(as.character(RATING))),
+    votos = suppressWarnings(parse_number(as.character(VOTES))),
+    duracion_min = suppressWarnings(parse_number(as.character(RunTime))),
+    recaudacion_millones = suppressWarnings(parse_number(as.character(Gross))),
+    sinopsis = str_squish(as.character(ONE.LINE)),
+    sinopsis = na_if(sinopsis, ""),
+    sinopsis = if_else(
+      !is.na(sinopsis) & str_detect(sinopsis, regex("^Add a Plot", ignore_case = TRUE)),
+      NA_character_, sinopsis
+    )
+  )
+knitr::kable(
+  head(movies_clean %>% select(MOVIES, YEAR, anio_inicio, anio_fin, es_serie, VOTES, votos, Gross, recaudacion_millones), 8),
+  caption = "Evidencia de transformación sin sobrescribir las columnas crudas"
+)
+cat("Sinopsis faltantes tras tratar el centinela:", sum(is.na(movies_clean$sinopsis)), "\n")
+```
+
+**Nota:** `es_serie` es un indicador provisional construido a partir del patrón del año, no una clasificación verificada del formato audiovisual. La recaudación se interpreta en millones si los valores originales usan `$...M`; otras unidades se deben auditar antes de analizarlas.
+
+# Paso 4. Análisis de faltantes y mecanismo de ausencia
+
+```{r}
+#| label: patron-faltantes
+analisis_faltantes <- movies_clean %>%
+  mutate(periodo = case_when(
+    is.na(anio_inicio) ~ "Año desconocido",
+    anio_inicio < 2022 ~ "Antes de 2022",
+    TRUE ~ "Desde 2022"
+  ), falta_rating = is.na(rating)) %>%
+  group_by(periodo) %>%
+  summarise(total = n(), faltantes = sum(falta_rating), porcentaje = round(100 * mean(falta_rating), 2), .groups = "drop")
+knitr::kable(analisis_faltantes, caption = "Ausencia de calificación por periodo")
+```
+
+```{r}
+#| label: plot-faltantes
+analisis_faltantes %>% ggplot(aes(x = periodo, y = porcentaje)) +
+  geom_col(fill = "steelblue") +
+  geom_text(aes(label = paste0(porcentaje, "%")), vjust = -0.4) +
+  coord_cartesian(ylim = c(0, 110)) +
+  labs(title = "Ausencia de calificación por periodo", x = "Periodo", y = "Porcentaje sin calificación") +
+  theme_minimal()
+```
+
+**Interpretación:** la asociación del año observado con la ausencia es compatible con MAR bajo supuestos adicionales y contradice la idea de pérdidas completamente independientes de las covariables; no demuestra MAR frente a MNAR. El grupo sin año requiere un examen específico. Las calificaciones sin observar **no se imputan en el dataset final**.
+
+```{r}
+#| label: imputacion-solo-demostracion
+rating_original <- movies_clean$rating
+rating_demo <- ifelse(is.na(rating_original), median(rating_original, na.rm = TRUE), rating_original)
+comparacion_imputacion <- data.frame(
+  escenario = c("Observados", "Mediana (solo demostración)"),
+  n = c(sum(!is.na(rating_original)), length(rating_demo)),
+  media = round(c(mean(rating_original, na.rm = TRUE), mean(rating_demo)), 2),
+  desviacion_estandar = round(c(sd(rating_original, na.rm = TRUE), sd(rating_demo)), 2)
+)
+knitr::kable(comparacion_imputacion, caption = "Efecto de imputar con la mediana: demostración, no dataset final")
+```
+
+# Paso 5. Duplicados y unidad de análisis
+
+```{r}
+#| label: duplicados
+movies_sin_duplicados <- movies_raw %>% distinct()
+resumen_unicidad <- data.frame(
+  etapa = c("Crudos", "Sin copias exactas"),
+  filas = c(nrow(movies_raw), nrow(movies_sin_duplicados))
+)
+knitr::kable(resumen_unicidad, caption = "Eliminación de copias exactas")
+
+titulos_repetidos <- movies_clean %>% count(MOVIES, name = "frecuencia") %>%
+  filter(frecuencia > 1) %>% arrange(desc(frecuencia))
+knitr::kable(head(titulos_repetidos, 10), caption = "Ejemplos de títulos repetidos")
+
+movies_obras <- movies_clean %>%
+  mutate(titulo_clave = str_to_lower(str_squish(as.character(MOVIES))),
+         tiene_rating = !is.na(rating)) %>%
+  arrange(desc(tiene_rating), desc(votos)) %>%
+  distinct(titulo_clave, .keep_all = TRUE)
+cat("Filas finales, criterio título normalizado:", nrow(movies_obras), "\n")
+cat("Claves de título duplicadas:", sum(duplicated(movies_obras$titulo_clave)), "\n")
+```
+
+**Decisión:** el título normalizado se usa como *clave provisional* para el ejercicio. Puede reunir obras homónimas o registros de episodios; elegir la fila con mayor cantidad de votos puede inducir sesgo. No equivale a un identificador único certificado de IMDb.
+
+# Paso 6. Plausibilidad y unidades de duración
+
+```{r}
+#| label: plausibilidad
+movies_obras <- movies_obras %>%
+  mutate(duracion_extrema = !is.na(duracion_min) & duracion_min > 300)
+knitr::kable(
+  movies_obras %>% filter(duracion_extrema) %>% count(es_serie),
+  caption = "Duraciones superiores a 300 minutos por indicador provisional de serie"
+)
+cat("Total duraciones >300:", sum(movies_obras$duracion_extrema), "\n")
+knitr::kable(
+  head(movies_obras %>% filter(duracion_extrema) %>%
+         select(MOVIES, YEAR, duracion_min, es_serie) %>% arrange(desc(duracion_min)), 15),
+  caption = "Ejemplos de duraciones extremas"
+)
+```
+
+```{r}
+#| label: graficos-plausibilidad
+movies_obras %>%
+  ggplot(aes(x = duracion_min)) +
+  geom_histogram(bins = 40, fill = "steelblue", color = "white") +
+  labs(title = "Distribución de duración", x = "Duración (minutos)", y = "Frecuencia") +
+  theme_minimal()
+```
+
+**Decisión:** valores superiores a 300 minutos se marcan sin eliminar; requieren revisión de la unidad de medida (película, episodio o duración total de serie).
+
+# Paso 7. Validación con reglas explícitas
+
+```{r}
+#| label: validacion
+validacion <- movies_obras %>% summarise(
+  registros = n(),
+  anio_invalido = sum(!is.na(anio_inicio) & (anio_inicio < 1900 | anio_inicio > 2030)),
+  rating_invalido = sum(!is.na(rating) & (rating < 1 | rating > 10)),
+  votos_negativos = sum(votos < 0, na.rm = TRUE),
+  duraciones_no_positivas = sum(duracion_min <= 0, na.rm = TRUE),
+  duraciones_superiores_300 = sum(duracion_min > 300, na.rm = TRUE),
+  anios_inconsistentes = sum(!is.na(anio_inicio) & !is.na(anio_fin) & anio_fin < anio_inicio)
+)
+knitr::kable(validacion, caption = "Reglas de validez y consistencia (NA evaluados aparte)")
+```
+
+La validación del catálogo de géneros y la exactitud de las obras requieren una fuente de referencia adicional. El rango 300 minutos es una **alerta de plausibilidad**, no un criterio universal de invalidez.
+
+# Cierre. Calificación por género, año y formato
+
+```{r}
+#| label: generos
+movies_obras <- movies_obras %>%
+  mutate(genero_principal = str_trim(str_extract(as.character(GENRE), "^[^,]+")),
+         genero_principal = na_if(genero_principal, ""))
+resumen_generos <- movies_obras %>%
+  filter(!is.na(rating), !is.na(genero_principal)) %>%
+  group_by(genero_principal) %>%
+  summarise(n = n(), media = mean(rating), mediana = median(rating), de = sd(rating), .groups = "drop") %>%
+  filter(n >= 30) %>% arrange(desc(media))
+knitr::kable(resumen_generos %>% mutate(across(c(media, mediana, de), ~round(.x, 2))),
+             caption = "Calificación por género principal, grupos con n >= 30")
+```
+
+```{r}
+#| label: plot-generos
+resumen_generos %>%
+  ggplot(aes(x = reorder(genero_principal, media), y = media)) +
+  geom_col(fill = "steelblue") + coord_flip() +
+  labs(title = "Calificación media por género principal", x = "Género", y = "Media de calificación") +
+  theme_minimal()
+```
+
+```{r}
+#| label: resumen-anios
+resumen_anios <- movies_obras %>%
+  filter(!is.na(anio_inicio), !is.na(rating)) %>%
+  group_by(anio_inicio) %>%
+  summarise(n = n(), media = mean(rating), .groups = "drop") %>% filter(n >= 10)
+resumen_anios %>%
+  ggplot(aes(x = anio_inicio, y = media)) + geom_line(color = "steelblue") +
+  geom_point(size = 1.3) +
+  labs(title = "Calificación media por año de inicio (n >= 10)", x = "Año", y = "Media") + theme_minimal()
+```
+
+```{r}
+#| label: formato
+# 'es_serie' es proxy basado en YEAR; su interpretación NO es validación del formato.
+resumen_formato_provisional <- movies_obras %>%
+  filter(!is.na(rating), !is.na(es_serie)) %>%
+  group_by(es_serie) %>%
+  summarise(n = n(), media = round(mean(rating), 2), .groups = "drop")
+knitr::kable(resumen_formato_provisional, caption = "Comparación exploratoria por indicador provisional de serie")
+```
+
+**Conclusión metodológica:** las diferencias entre promedios son asociaciones descriptivas en una muestra depurada bajo un criterio provisional de unicidad. No son efectos causales. La pérdida de calificaciones por año y la selección del registro más votado pueden alterar la representatividad y deben reconocerse como limitaciones.
+
+# Registro de decisiones y reproducibilidad
+
+```{r}
+#| label: decisiones
+registro <- data.frame(
+  codigo = sprintf("D%02d", 1:7),
+  decision = c("Preservar datos crudos", "Extraer año, votos y recaudación", "Cambiar centinela Add a Plot por NA", "No imputar calificaciones en análisis final", "Eliminar copias exactas y auditar títulos", "Marcar duración >300 sin borrar", "Comparar calificaciones por género, año y proxy de formato"),
+  fundamento = c("Trazabilidad", "Validez de tipos", "Completitud", "Evitar datos artificiales", "Unicidad bajo criterio explícito", "Plausibilidad sin pérdida de información", "Responder exploratoriamente la pregunta")
+)
+knitr::kable(registro, caption = "Bitácora de decisiones")
+```
+
+```{r}
+#| label: exportar
+# Se conservan los archivos originales y se guardan salidas nuevas.
+dir.create("data/processed", recursive = TRUE, showWarnings = FALSE)
+write.csv(movies_obras, "data/processed/movies_obras_curado.csv", row.names = FALSE, na = "")
+write.csv(registro, "data/processed/registro_decisiones_lab2a.csv", row.names = FALSE)
+cat("Archivos generados en data/processed/\n")
+```
+
+
+
+# Conclusiones del Laboratorio 2A
+
+## Calidad de los datos
+
+El análisis permitió evaluar la calidad de una base de
+9,999 registros de películas y series, mediante
+procedimientos reproducibles implementados en R y Quarto.
+
+El diagnóstico inicial identificó 1,820 valores faltantes
+en RATING y 2,958 en RunTime. Además, se reconocieron
+1,265 sinopsis que contenían el texto centinela
+"Add a Plot", posteriormente convertido en NA.
+
+## Unicidad y valores atípicos
+
+La auditoría identificó 431 copias exactas, cuya
+eliminación dejó 9,568 registros.
+
+Posteriormente, la consolidación provisional por
+título normalizado produjo 6,422 registros únicos.
+Este procedimiento requiere cautela, porque pueden
+existir obras diferentes con un mismo título.
+
+Se identificaron 41 producciones con duraciones
+superiores a 300 minutos. Estos registros fueron
+marcados y conservados por representar posibles
+formatos especiales o duraciones acumuladas.
+
+## Respuesta a la pregunta de investigación
+
+El análisis descriptivo identificó diferencias en las
+calificaciones según el género principal, el año de
+inicio y un indicador provisional del formato.
+
+Los documentales presentaron una calificación
+media de 7.10, seguidos por las producciones
+de animación (6.92). El género terror registró
+una calificación media de 4.90.
+
+Según el indicador provisional de serie, los
+registros clasificados como TRUE presentaron
+una calificación media de 7.14, frente a 6.37
+en los registros FALSE.
+
+También se observaron fluctuaciones temporales
+en las calificaciones medias.
+
+Estos resultados representan asociaciones descriptivas,
+sin demostrar causalidad ni significancia estadística.
+
+## Limitaciones metodológicas
+
+Los resultados deben interpretarse considerando
+la presencia de valores faltantes, la selección de
+registros durante la consolidación por título y
+las limitaciones del indicador es_serie.
+
+La clasificación por título no constituye un
+identificador inequívoco de obra, y el indicador
+es_serie se obtuvo a partir de patrones del año,
+sin una validación externa del formato.
+
+Asimismo, no es posible confirmar MAR frente a MNAR
+únicamente mediante el análisis descriptivo.
+
+## Conclusión general
+
+El laboratorio demuestra la importancia de evaluar
+la completitud, validez, consistencia, unicidad y
+plausibilidad antes de utilizar los datos en
+análisis estadísticos o modelos de inteligencia
+artificial.
+
+La conservación de los datos originales, la
+documentación de las transformaciones y las reglas
+explícitas de validación fortalecen la transparencia
+y reproducibilidad de la investigación.

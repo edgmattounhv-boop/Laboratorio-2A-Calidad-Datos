@@ -1,0 +1,8 @@
+"codigo","decision","fundamento"
+"D01","Preservar datos crudos","Trazabilidad"
+"D02","Extraer año, votos y recaudación","Validez de tipos"
+"D03","Cambiar centinela Add a Plot por NA","Completitud"
+"D04","No imputar calificaciones en análisis final","Evitar datos artificiales"
+"D05","Eliminar copias exactas y auditar títulos","Unicidad bajo criterio explícito"
+"D06","Marcar duración >300 sin borrar","Plausibilidad sin pérdida de información"
+"D07","Comparar calificaciones por género, año y proxy de formato","Responder exploratoriamente la pregunta"
